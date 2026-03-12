@@ -1,0 +1,5 @@
+hello this is message and we 
+are reading 8 bytes at a time 
+from this file so if you see more than 8 bytes then you 
+f ked up 
+Now we are printing one line at a time 
