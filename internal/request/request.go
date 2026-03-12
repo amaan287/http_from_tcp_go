@@ -56,7 +56,9 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 	}
 	str := string(data)
 	rl, _, err := parseRequestLine(str)
-
+	if err != nil {
+		return nil, err
+	}
 	return &Request{
 		RequestLine: *rl,
 	}, nil
