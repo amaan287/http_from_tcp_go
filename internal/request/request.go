@@ -23,8 +23,14 @@ func (r *RequestLine) ValidHTTP() bool {
 var ERROR_BAD_START_LINE = fmt.Errorf("bad start line")
 var ERROR_MALFORMED_REQUEST_LINE = fmt.Errorf("malformed request-line")
 var ERROR_UNSUPPORTED_HTTP_VERSION = fmt.Errorf("Http version is not supported")
-
 var SEPERATOR = "\r\n"
+
+type parserState string
+
+const (
+	StateInit parserState = "init"
+	StateDone parserState = "done"
+)
 
 func parseRequestLine(b string) (*RequestLine, string, error) {
 	idx := strings.Index(b, SEPERATOR)
