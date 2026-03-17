@@ -12,7 +12,7 @@ import (
 type chunkReader struct {
 	data            string
 	numBytesPerRead int
-	pos             int
+	pos             int //pos = current position
 }
 
 func (cr *chunkReader) Read(p []byte) (n int, err error) {
