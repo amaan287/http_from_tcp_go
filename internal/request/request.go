@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"strconv"
+
+	"github.com/amaan287/httpserver/internal/headers"
 )
 
 type parserState string
+
 type RequestLine struct {
 	HttpVersion   string
 	RequestTarget string
@@ -15,19 +20,25 @@ type RequestLine struct {
 }
 
 const (
-	StateInit  parserState = "init"
-	StateDone  parserState = "done"
-	StateError parserState = "error"
+	StateInit    parserState = "init"
+	StateHeaders parserState = "headers"
+	StateBody    parserState = "body"
+	StateDone    parserState = "done"
+	StateError   parserState = "error"
 )
 
 type Request struct {
 	RequestLine RequestLine
+	Headers     *headers.Headers
+	Body        string
 	state       parserState
 }
 
 func newRequest() *Request {
 	return &Request{
-		state: StateInit,
+		state:   StateInit,
+		Headers: headers.NewHeaders(),
+		Body:    "",
 	}
 
 }
@@ -68,15 +79,28 @@ func parseRequestLine(b []byte) (*RequestLine, int, error) {
 	return rl, read, nil
 
 }
+func getInt(header *headers.Headers, name string, defaultValue int) int {
+
+	valueStr, exists := header.Get(name)
+	if !exists {
+		return defaultValue
+	}
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return defaultValue
+	}
+	return value
+}
 func (r *Request) parse(data []byte) (int, error) {
 	read := 0
 outer:
 	for {
+		currentData := data[read:]
 		switch r.state {
 		case StateError:
 			return 0, ERROR_REQUEST_IN_ERROR_STATE
 		case StateInit:
-			rl, n, err := parseRequestLine(data[read:])
+			rl, n, err := parseRequestLine(currentData)
 			if err != nil {
 				r.state = StateError
 				return 0, err
@@ -86,9 +110,37 @@ outer:
 			}
 			r.RequestLine = *rl
 			read += n
-			r.state = StateDone
+			r.state = StateHeaders
+		case StateHeaders:
+			n, done, err := r.Headers.Parse(currentData)
+			if err != nil {
+				r.state = StateError
+				return 0, err
+			}
+			if n == 0 {
+				break outer
+			}
+			read += n
+			if done {
+				r.state = StateBody
+			}
+		case StateBody:
+			lengthStr := getInt(r.Headers, "content-length", 0)
+			if lengthStr == 0 {
+				r.state = StateDone
+				break
+			}
+			remaining := min(lengthStr-len(r.Body), len(currentData))
+			r.Body += string(currentData[:remaining])
+			read += remaining
+			slog.Info("parse state Body", "remaining", remaining)
+			if len(r.Body) == lengthStr {
+				r.state = StateDone
+			}
 		case StateDone:
 			break outer
+		default:
+			panic("somehow we are noob at programming")
 		}
 	}
 	return read, nil
@@ -105,13 +157,19 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 		//TODO handle io.EOF error
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				request.state = StateDone
+				// process remaining buffer before exiting
+				if bufLen > 0 {
+					_, parseErr := request.parse(buf[:bufLen])
+					if parseErr != nil {
+						return nil, parseErr
+					}
+				}
 				break
 			}
 			return nil, err
 		}
 		bufLen += n
-		readN, err := request.parse(buf[:bufLen+n])
+		readN, err := request.parse(buf[:bufLen])
 		if err != nil {
 			return nil, err
 		}
