@@ -91,11 +91,21 @@ func getInt(header *headers.Headers, name string, defaultValue int) int {
 	}
 	return value
 }
+
+func (r *Request) hasBody() bool {
+	//TODO: when doing chunked encoding updated this method
+	length := getInt(r.Headers, "Content-length", 0)
+	return length == 0
+}
+
 func (r *Request) parse(data []byte) (int, error) {
 	read := 0
 outer:
 	for {
 		currentData := data[read:]
+		if len(currentData) == 0 {
+			break outer
+		}
 		switch r.state {
 		case StateError:
 			return 0, ERROR_REQUEST_IN_ERROR_STATE
@@ -122,18 +132,23 @@ outer:
 			}
 			read += n
 			if done {
+				if r.hasBody() {
+					r.state = StateBody
+
+				} else {
+					r.state = StateDone
+				}
 				r.state = StateBody
 			}
 		case StateBody:
 			lengthStr := getInt(r.Headers, "content-length", 0)
 			if lengthStr == 0 {
-				r.state = StateDone
-				break
+				panic("Chunked not implemented")
 			}
 			remaining := min(lengthStr-len(r.Body), len(currentData))
 			r.Body += string(currentData[:remaining])
 			read += remaining
-			slog.Info("parse state Body", "remaining", remaining)
+			slog.Info("parse state Body", "remaining", remaining, "read", read, "body", r.Body)
 			if len(r.Body) == lengthStr {
 				r.state = StateDone
 			}

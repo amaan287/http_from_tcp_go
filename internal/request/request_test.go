@@ -29,6 +29,7 @@ func (cr *chunkReader) Read(p []byte) (n int, err error) {
 	return n, nil
 
 }
+
 func TestRequestLineParse(t *testing.T) {
 	reader := &chunkReader{
 		data:            "GET / HTTP/1.1\r\nHOST: localhost:42069\r\nUser-Agent: curl/8.5.0\r\nAccept: */*\r\n\r\n",

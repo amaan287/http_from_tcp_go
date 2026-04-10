@@ -1,9 +1,10 @@
 package headers
 
 import (
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestHeadeParse(t *testing.T) {
@@ -18,6 +19,7 @@ func TestHeadeParse(t *testing.T) {
 	host, ok = headers.Get("FooFoo")
 	assert.True(t, ok)
 	assert.Equal(t, "barbar", host)
+
 	_, ok = headers.Get("MissingKey")
 	assert.False(t, ok)
 	assert.Equal(t, 52, n)
