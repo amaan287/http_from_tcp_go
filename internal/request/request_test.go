@@ -101,3 +101,54 @@ func TestParseBody(t *testing.T) {
 	r, err = RequestFromReader(reader)
 	require.Error(t, err)
 }
+
+// Regression test: a body-less request must reach StateDone, or a pipelined follow-up gets misread as body.
+func TestNoBodyRequest(t *testing.T) {
+	reader := &chunkReader{
+		data: "GET / HTTP/1.1\r\n" +
+			"Host: localhost:42069\r\n" +
+			"\r\n" +
+			"GET /second HTTP/1.1\r\n" +
+			"Host: localhost:42069\r\n" +
+			"\r\n",
+		numBytesPerRead: 3,
+	}
+	r, err := RequestFromReader(reader)
+	require.NoError(t, err)
+	require.NotNil(t, r)
+	assert.Equal(t, "GET", r.RequestLine.Method)
+	assert.Equal(t, "/", r.RequestLine.RequestTarget)
+	assert.Equal(t, "", r.Body)
+}
+
+func TestParseChunkedBody(t *testing.T) {
+	reader := &chunkReader{
+		data: "POST /submit HTTP/1.1\r\n" +
+			"Host: localhost:42069\r\n" +
+			"Transfer-Encoding: chunked\r\n" +
+			"\r\n" +
+			"4\r\nWiki\r\n" +
+			"5\r\npedia\r\n" +
+			"E\r\n in\r\n\r\nchunks.\r\n" +
+			"0\r\n\r\n",
+		numBytesPerRead: 3,
+	}
+	r, err := RequestFromReader(reader)
+	require.NoError(t, err)
+	require.NotNil(t, r)
+	assert.Equal(t, "Wikipedia in\r\n\r\nchunks.", r.Body)
+}
+
+func TestIncompleteRequest(t *testing.T) {
+	// Content-Length promises 20 bytes but only 7 arrive before EOF.
+	reader := &chunkReader{
+		data: "POST /submit HTTP/1.1\r\n" +
+			"Host: localhost:42069\r\n" +
+			"Content-Length: 20\r\n" +
+			"\r\n" +
+			"partial",
+		numBytesPerRead: 3,
+	}
+	_, err := RequestFromReader(reader)
+	require.ErrorIs(t, err, ERROR_INCOMPLETE_REQUEST)
+}

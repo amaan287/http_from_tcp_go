@@ -33,17 +33,19 @@ func parseHeader(fieldLine []byte) (string, string, error) {
 	}
 
 	name := fieldLine[:idx]
-	value := fieldLine[idx+1:]
+	value := bytes.TrimSpace(fieldLine[idx+1:])
 
-	if bytes.Contains(name, []byte(" ")) {
+	// no whitespace allowed between field-name and colon (RFC 9112).
+	if bytes.ContainsAny(name, " \t") {
 		return "", "", fmt.Errorf("malformed field name")
 	}
 
-	name = bytes.TrimSpace(name)
-	value = bytes.TrimSpace(value)
-
 	if len(name) == 0 {
 		return "", "", fmt.Errorf("empty header name")
+	}
+
+	if !isToken(name) {
+		return "", "", fmt.Errorf("invalid header name: %q", name)
 	}
 
 	return string(name), string(value), nil

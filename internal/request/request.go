@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/amaan287/httpserver/internal/headers"
 )
@@ -27,18 +27,31 @@ const (
 	StateError   parserState = "error"
 )
 
+// chunkParseState tracks progress through a chunked-encoded body.
+type chunkParseState string
+
+const (
+	chunkStateSize    chunkParseState = "size"
+	chunkStateData    chunkParseState = "data"
+	chunkStateTrailer chunkParseState = "trailer"
+)
+
 type Request struct {
 	RequestLine RequestLine
 	Headers     *headers.Headers
 	Body        string
 	state       parserState
+
+	chunkState     chunkParseState
+	chunkRemaining int
 }
 
 func newRequest() *Request {
 	return &Request{
-		state:   StateInit,
-		Headers: headers.NewHeaders(),
-		Body:    "",
+		state:      StateInit,
+		Headers:    headers.NewHeaders(),
+		Body:       "",
+		chunkState: chunkStateSize,
 	}
 
 }
@@ -50,8 +63,12 @@ var ERROR_REQUEST_IN_ERROR_STATE = fmt.Errorf("request in error state")
 var ERROR_BAD_START_LINE = fmt.Errorf("bad start line")
 var ERROR_MALFORMED_REQUEST_LINE = fmt.Errorf("malformed request-line")
 var ERROR_UNSUPPORTED_HTTP_VERSION = fmt.Errorf("Http version is not supported")
+var ERROR_INCOMPLETE_REQUEST = fmt.Errorf("incomplete request: connection closed before request finished")
 
 var SEPERATOR = []byte("\r\n")
+
+// initialBufferSize is the read buffer's starting size; it doubles when full.
+const initialBufferSize = 1024
 
 func (r *Request) done() bool {
 	return r.state == StateDone || r.state == StateError
@@ -92,10 +109,16 @@ func getInt(header *headers.Headers, name string, defaultValue int) int {
 	return value
 }
 
+func (r *Request) isChunked() bool {
+	te, ok := r.Headers.Get("transfer-encoding")
+	return ok && strings.Contains(strings.ToLower(te), "chunked")
+}
+
 func (r *Request) hasBody() bool {
-	//TODO: when doing chunked encoding updated this method
-	length := getInt(r.Headers, "Content-length", 0)
-	return length == 0
+	if getInt(r.Headers, "content-length", 0) > 0 {
+		return true
+	}
+	return r.isChunked()
 }
 
 func (r *Request) parse(data []byte) (int, error) {
@@ -134,24 +157,20 @@ outer:
 			if done {
 				if r.hasBody() {
 					r.state = StateBody
-
 				} else {
 					r.state = StateDone
 				}
-				r.state = StateBody
 			}
 		case StateBody:
-			lengthStr := getInt(r.Headers, "content-length", 0)
-			if lengthStr == 0 {
-				panic("Chunked not implemented")
+			n, err := r.parseBody(currentData)
+			if err != nil {
+				r.state = StateError
+				return 0, err
 			}
-			remaining := min(lengthStr-len(r.Body), len(currentData))
-			r.Body += string(currentData[:remaining])
-			read += remaining
-			slog.Info("parse state Body", "remaining", remaining, "read", read, "body", r.Body)
-			if len(r.Body) == lengthStr {
-				r.state = StateDone
+			if n == 0 {
+				break outer
 			}
+			read += n
 		case StateDone:
 			break outer
 		default:
@@ -161,23 +180,114 @@ outer:
 	return read, nil
 }
 
+// parseBody consumes body bytes per the declared framing (chunked or Content-Length).
+func (r *Request) parseBody(data []byte) (int, error) {
+	if r.isChunked() {
+		return r.parseChunkedBody(data)
+	}
+
+	contentLength := getInt(r.Headers, "content-length", 0)
+	if contentLength <= 0 {
+		// shouldn't happen if hasBody() is correct; avoid looping forever.
+		r.state = StateDone
+		return 0, nil
+	}
+	remaining := min(contentLength-len(r.Body), len(data))
+	r.Body += string(data[:remaining])
+	if len(r.Body) == contentLength {
+		r.state = StateDone
+	}
+	return remaining, nil
+}
+
+// parseChunkedBody implements RFC 9112 chunked transfer-coding.
+func (r *Request) parseChunkedBody(data []byte) (int, error) {
+	read := 0
+	for {
+		switch r.chunkState {
+		case chunkStateSize:
+			idx := bytes.Index(data[read:], SEPERATOR)
+			if idx == -1 {
+				return read, nil
+			}
+			sizeLine := data[read : read+idx]
+			if semi := bytes.IndexByte(sizeLine, ';'); semi != -1 {
+				sizeLine = sizeLine[:semi] // ignore chunk extensions
+			}
+			size, err := strconv.ParseInt(string(bytes.TrimSpace(sizeLine)), 16, 64)
+			if err != nil || size < 0 {
+				return 0, fmt.Errorf("invalid chunk size: %q", sizeLine)
+			}
+			read += idx + len(SEPERATOR)
+			r.chunkRemaining = int(size)
+			if size == 0 {
+				r.chunkState = chunkStateTrailer
+			} else {
+				r.chunkState = chunkStateData
+			}
+		case chunkStateData:
+			available := len(data) - read
+			if r.chunkRemaining > 0 {
+				if available == 0 {
+					return read, nil
+				}
+				n := min(r.chunkRemaining, available)
+				r.Body += string(data[read : read+n])
+				read += n
+				r.chunkRemaining -= n
+				available -= n
+			}
+			if r.chunkRemaining > 0 {
+				return read, nil
+			}
+			if available < len(SEPERATOR) {
+				return read, nil
+			}
+			if !bytes.Equal(data[read:read+len(SEPERATOR)], SEPERATOR) {
+				return 0, fmt.Errorf("malformed chunk data terminator")
+			}
+			read += len(SEPERATOR)
+			r.chunkState = chunkStateSize
+		case chunkStateTrailer:
+			n, done, err := r.Headers.Parse(data[read:])
+			if err != nil {
+				return 0, err
+			}
+			if n == 0 {
+				return read, nil
+			}
+			read += n
+			if done {
+				r.state = StateDone
+				return read, nil
+			}
+		}
+	}
+}
+
 func RequestFromReader(reader io.Reader) (*Request, error) {
 	request := newRequest()
-	// NOTE: buffer could overrun... a header that exceeds 1k would do that...
-	// or body
-	buf := make([]byte, 1024)
+	buf := make([]byte, initialBufferSize)
 	bufLen := 0
 	for !request.done() {
+		if bufLen == len(buf) {
+			grown := make([]byte, len(buf)*2)
+			copy(grown, buf)
+			buf = grown
+		}
 		n, err := reader.Read(buf[bufLen:])
-		//TODO handle io.EOF error
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				// process remaining buffer before exiting
 				if bufLen > 0 {
-					_, parseErr := request.parse(buf[:bufLen])
+					readN, parseErr := request.parse(buf[:bufLen])
 					if parseErr != nil {
 						return nil, parseErr
 					}
+					bufLen -= readN
+				}
+				if !request.done() {
+					return nil, ERROR_INCOMPLETE_REQUEST
 				}
 				break
 			}

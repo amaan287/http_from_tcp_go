@@ -1,5 +1,5 @@
 build:
-	@go build -o ./cmd/tcplistner/main.go ./bin/httpfromtcp
+	@go build -o ./bin/httpfromtcp ./cmd/tcplistener/
 
 run: build
 	@./bin/httpfromtcp
